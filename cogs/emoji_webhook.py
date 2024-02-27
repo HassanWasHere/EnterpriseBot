@@ -7,8 +7,8 @@ import os
 import pymongo
 import asyncio
 
-pattern = ':\w+:($|\D)'
-
+#pattern = ':\w+:($|\D)'
+pattern = ':\w+:((?= )?(?=$)|(?=\D))'
 class EmojiWebhook(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -71,8 +71,14 @@ class EmojiWebhook(commands.Cog):
                 if value == emoji:
                     del self.uploaded_emojis[key]
 
+    async def find_message(self, reference):
+        channel_id = reference.channel_id
+        channel = await self.bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(reference.message_id)
+        return message
 
-    async def send_message(self, member, channel, content):
+
+    async def send_message(self, member, channel, content, reference=None):
         webhook_data = self.bot.db_con.get_webhook(channel.id)
         webhook = None
         if webhook_data:
@@ -85,33 +91,53 @@ class EmojiWebhook(commands.Cog):
         if webhook == None:
             webhook = await channel.create_webhook(name="Test")
             self.bot.db_con.add_webhook(channel.id, webhook.id)
-        await webhook.edit(name=member.display_name, avatar=(await member.display_avatar.read()))   
-        await webhook.send(content=content)
+        newView = None
+        if reference:
+            message = await self.find_message(reference)
 
+            new_embed = discord.Embed(type="rich", title=f"{message.clean_content}", color=discord.Color.blue(), url=message.jump_url)
+            new_embed.set_author(name=message.author.display_name, icon_url=message.author.display_avatar.url)
+            if message.clean_content == "":
+                new_embed.title = "*Jump to media*"
+            await webhook.send(username=member.display_name, avatar_url=(member.display_avatar.url), embed=new_embed)
+            await webhook.send(username=member.display_name, avatar_url=(member.display_avatar.url), content=content)
+        else:
+            await webhook.send(username=member.display_name, avatar_url=(member.display_avatar.url), content=content)
     
     async def parse_content(self, message_content):
         content = "" + message_content
+        original_content = "" + message_content
         emojis_used = []
+        error_messages=[]
         while re.search(pattern, content):
             emoji_name = re.search(pattern, content).group(0).split(":")[1]
             emoji = await self.get_emoji(emoji_name)
-            if not emoji in emojis_used:
-                emojis_used.append(emoji)
-            content = re.sub(pattern, str(emoji) + " ", content, 1)
-        return content, emojis_used
-        
-
+            if emoji:
+                if not emoji in emojis_used:
+                    emojis_used.append(emoji)
+                content = re.sub(pattern, str(emoji) + " ", content, 1)
+            else:
+                error_messages.append(f"Emoji {emoji_name} not found")
+                content = re.sub(pattern, "", content, 1)
+        if len(emojis_used) == 0:
+            return original_content, [], error_messages, False     
+        return content, emojis_used, error_messages, True
+    
     @commands.Cog.listener()
     async def on_message(self, message):
         if message.author.bot == False and message.guild:
             ctx = await self.bot.get_context(message)
             if ctx.command == None:
                 if re.search(pattern, message.content):
-                    content, emojis_used = await self.parse_content(message.content)
+                    content, emojis_used, error_messages, todo = await self.parse_content(message.content)
+                    if len(error_messages) > 0:
+                        await message.channel.send(f"{str(message.author.mention)} "+ "\n".join(error_messages), delete_after=5)
+                    if not todo:
+                        return
                     await message.delete()
-                    await self.send_message(message.author, message.channel, content)
+                    await self.send_message(message.author, message.channel, content, message.reference)
                     await self.delete_emoji(emojis_used)
-        
+                    
 
     @commands.hybrid_command(name="say", description="Type a message using the Enterprise bot")
     async def say(self, ctx, message):
